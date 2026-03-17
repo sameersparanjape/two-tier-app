@@ -72,6 +72,13 @@ resource "aws_ecs_service" "backend" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  deployment_minimum_healthy_percent = 0
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = false
+  }
+
   network_configuration {
     subnets          = [aws_subnet.public_a.id, aws_subnet.public_b.id]
     security_groups  = [aws_security_group.ecs.id]
@@ -91,6 +98,13 @@ resource "aws_ecs_service" "frontend" {
   task_definition = aws_ecs_task_definition.frontend.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  deployment_minimum_healthy_percent = 0
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = false
+  }
 
   network_configuration {
     subnets          = [aws_subnet.public_a.id, aws_subnet.public_b.id]
