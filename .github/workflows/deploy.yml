@@ -1,0 +1,95 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-2
+  PROJECT: random-number-service
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend
+        run: |
+          docker build -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ steps.vars.outputs.sha }} -f backend/Dockerfile .
+          docker push ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ steps.vars.outputs.sha }}
+
+      - name: Build and push frontend
+        run: |
+          docker build -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ steps.vars.outputs.sha }} -f frontend/Dockerfile frontend/
+          docker push ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ steps.vars.outputs.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy backend
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ env.PROJECT }}-backend --query taskDefinition)
+          NEW_DEF=$(echo "$TASK_DEF" | jq --arg IMG "${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ needs.build.outputs.image_tag }}" '.containerDefinitions[0].image = $IMG | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          aws ecs register-task-definition --cli-input-json "$NEW_DEF"
+          aws ecs update-service --cluster ${{ env.PROJECT }}-cluster --service ${{ env.PROJECT }}-backend --task-definition ${{ env.PROJECT }}-backend --force-new-deployment
+
+      - name: Deploy frontend
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ env.PROJECT }}-frontend --query taskDefinition)
+          NEW_DEF=$(echo "$TASK_DEF" | jq --arg IMG "${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ needs.build.outputs.image_tag }}" '.containerDefinitions[0].image = $IMG | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          aws ecs register-task-definition --cli-input-json "$NEW_DEF"
+          aws ecs update-service --cluster ${{ env.PROJECT }}-cluster --service ${{ env.PROJECT }}-frontend --task-definition ${{ env.PROJECT }}-frontend --force-new-deployment
+
+      - name: Health check
+        run: |
+          TIMEOUT=300
+          INTERVAL=15
+          ELAPSED=0
+          for SERVICE in backend frontend; do
+            echo "Checking ${{ env.PROJECT }}-${SERVICE}..."
+            while [ $ELAPSED -lt $TIMEOUT ]; do
+              STATUS=$(aws ecs describe-services --cluster ${{ env.PROJECT }}-cluster --services ${{ env.PROJECT }}-${SERVICE} --query 'services[0].deployments[?status==`PRIMARY`].rolloutState' --output text)
+              if [ "$STATUS" = "COMPLETED" ]; then
+                echo "${{ env.PROJECT }}-${SERVICE} is healthy"
+                break
+              fi
+              echo "Waiting... (${ELAPSED}s/${TIMEOUT}s)"
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+            done
+            if [ $ELAPSED -ge $TIMEOUT ]; then
+              echo "FAILED: ${{ env.PROJECT }}-${SERVICE} did not stabilize within ${TIMEOUT}s"
+              exit 1
+            fi
+          done
+          echo "Deployment healthy"
