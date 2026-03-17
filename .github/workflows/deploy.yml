@@ -33,12 +33,12 @@ jobs:
 
       - name: Build and push backend
         run: |
-          docker build -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ steps.vars.outputs.sha }} -f backend/Dockerfile .
+          docker build --platform linux/amd64 -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ steps.vars.outputs.sha }} -f backend/Dockerfile .
           docker push ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-backend:${{ steps.vars.outputs.sha }}
 
       - name: Build and push frontend
         run: |
-          docker build -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ steps.vars.outputs.sha }} -f frontend/Dockerfile frontend/
+          docker build --platform linux/amd64 --build-arg NGINX_CONF=nginx.prod.conf -t ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ steps.vars.outputs.sha }} -f frontend/Dockerfile frontend/
           docker push ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-frontend:${{ steps.vars.outputs.sha }}
 
   deploy:
